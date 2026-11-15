@@ -150,6 +150,16 @@ class ContentExtractor:
         """
         return self.article_body_extractor.top_node_complemented
 
+    @property
+    def body_strategy(self) -> str | None:
+        """The source used for the article body by the last parse.
+
+        Returns:
+            str | None: ``"gravity_score"``, ``"structured_data"`` or
+            ``"semantic_container"``, or None if no body was found.
+        """
+        return self.article_body_extractor.body_strategy
+
     def calculate_best_node(self, doc: HtmlElement) -> HtmlElement | None:
         """Extracts the most probable top node for the article text
         based on a variety of heuristics

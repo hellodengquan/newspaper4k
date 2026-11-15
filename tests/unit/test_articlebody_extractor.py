@@ -1,13 +1,18 @@
 # ruff: noqa: D100, D103
 
+import json
+import pickle
 from types import SimpleNamespace
 
 import lxml.etree
 import lxml.html
 import pytest
 
+from newspaper import parsers
+from newspaper.article import Article
 from newspaper.configuration import Configuration
 from newspaper.extractors.articlebody_extractor import ArticleBodyExtractor
+from newspaper.text import StopWords
 
 
 def make_extractor():
@@ -235,3 +240,188 @@ def test_add_same_level_candidates_keeps_similar_scored_low_density_nodes(mocker
 
     assert [child.text for child in result] == ["top", "include"]
     assert all(child.getparent() is result for child in result)
+
+
+ARTICLE_PARAGRAPHS = [
+    "The first paragraph of the article contains enough words to be treated as a real body of text. "
+    "It introduces the topic with several sentences so that the word count clears the minimum body size.",
+    "The second paragraph continues the report and keeps the narrative flowing for the reader. "
+    "It adds details, quotes and context, which is what a complete news article body normally contains.",
+    "The third paragraph closes the report with additional context and a short outlook. "
+    "Readers reach a natural ending instead of a truncated fragment of the original page.",
+]
+
+
+def make_body_html(body: str, extra: str = "") -> str:
+    return f"<html><head><meta property='og:type' content='article'></head><body>{extra}{body}</body></html>"
+
+
+def test_parse_keeps_gravity_strategy_for_complete_body(mocker):
+    extractor = make_extractor()
+    html = make_body_html("<article>" + "".join(f"<p>{p}</p>" for p in ARTICLE_PARAGRAPHS) + "</article>")
+    doc = lxml.html.fromstring(html)
+
+    scored = doc.xpath("//article")[0]
+
+    mocker.patch.object(extractor, "calculate_best_node", return_value=scored)
+    mocker.patch.object(extractor, "complement_with_siblings", side_effect=lambda node: node)
+
+    extractor.parse(doc)
+
+    assert extractor.body_strategy == "gravity_score"
+    assert extractor.top_node is scored
+
+
+def test_parse_falls_back_to_structured_data_when_scored_body_missing(mocker):
+    extractor = make_extractor()
+    body = "\n\n".join(ARTICLE_PARAGRAPHS)
+    html = make_body_html(
+        "",
+        f"<script type='application/ld+json'>{json.dumps({'@type': 'NewsArticle', 'articleBody': body})}</script>",
+    )
+    doc = lxml.html.fromstring(html)
+
+    mocker.patch.object(extractor, "calculate_best_node", return_value=None)
+    mocker.patch.object(extractor, "complement_with_siblings", side_effect=lambda node: node)
+
+    extractor.parse(doc)
+
+    assert extractor.body_strategy == "structured_data"
+    assert extractor.top_node is not None
+    assert [p.text for p in extractor.top_node] == ARTICLE_PARAGRAPHS
+
+
+def test_parse_falls_back_to_semantic_container_when_scored_body_is_short(mocker):
+    extractor = make_extractor()
+    html = make_body_html(
+        "<article>" + "".join(f"<p>{p}</p>" for p in ARTICLE_PARAGRAPHS) + "</article>",
+        "<div><p>Tiny teaser.</p></div>",
+    )
+    doc = lxml.html.fromstring(html)
+    short = doc.xpath("//div/p")[0]
+
+    mocker.patch.object(extractor, "calculate_best_node", return_value=short)
+    mocker.patch.object(extractor, "complement_with_siblings", side_effect=lambda node: node)
+
+    extractor.parse(doc)
+
+    assert extractor.body_strategy == "semantic_container"
+    assert [p.text for p in extractor.top_node] == ARTICLE_PARAGRAPHS
+
+
+def test_parse_falls_back_when_scored_body_is_link_heavy(mocker):
+    extractor = make_extractor()
+    html = make_body_html(
+        "<main>" + "".join(f"<p>{p}</p>" for p in ARTICLE_PARAGRAPHS) + "</main>",
+        "<div>" + "".join(f"<a href='/{i}'>Link {i}</a>" for i in range(8)) + "</div>",
+    )
+    doc = lxml.html.fromstring(html)
+    links = doc.xpath("//a")[0].getparent()
+
+    mocker.patch.object(extractor, "calculate_best_node", return_value=links)
+    mocker.patch.object(extractor, "complement_with_siblings", side_effect=lambda node: node)
+    mocker.patch(
+        "newspaper.extractors.articlebody_extractor.parsers.is_highlink_density",
+        side_effect=lambda node, _language: node is links,
+    )
+
+    extractor.parse(doc)
+
+    assert extractor.body_strategy == "semantic_container"
+
+
+def test_semantic_fallback_drops_navigation_and_duplicate_paragraphs():
+    extractor = make_extractor()
+    repeated = "Repeated paragraph that must be kept only once in the final body."
+    html = make_body_html(
+        "<main>"
+        "<nav><a href='/'>Home</a><a href='/news'>News</a></nav>"
+        f"<p>{ARTICLE_PARAGRAPHS[0]}</p>"
+        f"<p>{repeated}</p>"
+        "<aside><a href='/related'>Related</a></aside>"
+        f"<p>{repeated}</p>"
+        f"<p>{ARTICLE_PARAGRAPHS[2]}</p>"
+        "</main>"
+    )
+    doc = lxml.html.fromstring(html)
+
+    extractor.stopwords = StopWords(Configuration().language)
+    candidates = extractor.semantic_body_candidates(doc)
+
+    assert candidates
+    assert candidates[0][0] == "semantic_container"
+    texts = [parsers.get_text(paragraph) for paragraph in candidates[0][1]]
+    assert texts == [ARTICLE_PARAGRAPHS[0], repeated, ARTICLE_PARAGRAPHS[2]]
+
+
+def test_structured_fallback_keeps_paragraph_order_and_ignores_empty_values():
+    extractor = make_extractor()
+    body = f"{ARTICLE_PARAGRAPHS[0]}\n\n{ARTICLE_PARAGRAPHS[1]}"
+    objects = [
+        {"@type": "NewsArticle", "articleBody": body},
+        {"@type": "NewsArticle", "articleBody": ""},
+    ]
+    doc = lxml.html.fromstring(
+        "<html><body>"
+        f"<script type='application/ld+json'>{json.dumps(objects[0])}</script>"
+        f"<script type='application/ld+json'>{json.dumps(objects[1])}</script>"
+        "</body></html>"
+    )
+
+    candidates = extractor.structured_body_candidates(doc)
+
+    assert len(candidates) == 1
+    assert candidates[0][0] == "structured_data"
+    assert [parsers.get_text(p) for p in candidates[0][1]] == ARTICLE_PARAGRAPHS[:2]
+
+
+def test_listing_page_is_excluded_from_semantic_fallback():
+    extractor = make_extractor()
+    doc = lxml.html.fromstring(
+        "<html><head><meta property='og:type' content='website'></head><body>"
+        "<main><p>Featured stories of the day from around the world of news.</p>"
+        "<a href='/1'>First headline</a><a href='/2'>Second headline</a></main>"
+        "</body></html>"
+    )
+
+    assert extractor.page_declares_non_article(doc) is True
+    assert (
+        extractor.page_declares_non_article(
+            lxml.html.fromstring(make_body_html("<article><p>Real body text here.</p></article>"))
+        )
+        is False
+    )
+
+
+def test_parse_keeps_complete_scored_body_over_shorter_fallback(mocker):
+    extractor = make_extractor()
+    html = make_body_html(
+        "<article>" + "".join(f"<p>{p}</p>" for p in ARTICLE_PARAGRAPHS) + "</article>",
+        f"<script type='application/ld+json'>{json.dumps({'@type': 'NewsArticle', 'articleBody': 'Tiny.'})}</script>",
+    )
+    doc = lxml.html.fromstring(html)
+    scored = doc.xpath("//article")[0]
+
+    mocker.patch.object(extractor, "calculate_best_node", return_value=scored)
+    mocker.patch.object(extractor, "complement_with_siblings", side_effect=lambda node: node)
+
+    extractor.parse(doc)
+
+    assert extractor.body_strategy == "gravity_score"
+    assert extractor.top_node is scored
+
+
+def test_strategy_reported_for_article_json_and_pickle():
+    body = "".join(f"<p>{p}</p>" for p in ARTICLE_PARAGRAPHS)
+    html = make_body_html(f"<article>{body}</article>")
+
+    article = Article("http://example.com/a", fetch_images=False)
+    article.download(html)
+    article.parse()
+
+    assert article.body_strategy == "gravity_score"
+    assert article.to_json(as_string=False)["body_strategy"] == "gravity_score"
+
+    restored = pickle.loads(pickle.dumps(article))
+    assert restored.body_strategy == "gravity_score"
+    assert restored.text == article.text

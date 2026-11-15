@@ -122,6 +122,12 @@ class Article:
         top_node (HtmlElement): Top node of the original DOM tree.
             It contains the text nodes for the detected article body. This node
             is on the doc DOM tree.
+        body_strategy (str): The source used to extract the article body. It
+            is ``"gravity_score"`` for the default heuristic,
+            ``"structured_data"`` when the body had to be taken from JSON-LD
+            or microdata, and ``"semantic_container"`` when it came from a
+            ``<article>``, ``<main>`` or ``role="main"`` container. It is
+            ``None`` when no body could be found.
 
         doc (HtmlElement): the full DOM of the downloaded html. It is
             the original DOM tree.
@@ -285,6 +291,11 @@ class Article:
 
         # The top node complemented with siblings (off-tree)
         self._top_node_complemented: HtmlElement | None = None
+
+        # Where the article body came from: "gravity_score" (default),
+        # "structured_data" (JSON-LD/microdata articleBody) or
+        # "semantic_container" (<article>, <main>, role="main").
+        self.body_strategy: str | None = None
 
         # lxml DOM object generated from HTML
         self.doc: HtmlElement | None = None
@@ -479,6 +490,9 @@ class Article:
         self.top_node = self.extractor.calculate_best_node(self.doc)
         # Off-tree Node containing the top node and any relevant siblings
         self._top_node_complemented = self.extractor.top_node_complemented
+        # Which source provided the body (gravity score, structured data or
+        # a semantic container). Kept for explainability/telemetry.
+        self.body_strategy = self.extractor.body_strategy
 
         self.set_movies(self.extractor.get_videos(self.doc, self.top_node))
 

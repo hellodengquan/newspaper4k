@@ -100,6 +100,37 @@ For example, you could:
     # '<Element div at 0x7f2b8c0b6b90>'
 
 
+Knowing where the article body came from
+----------------------------------------
+
+The default body extraction is based on a gravity score over the DOM. When the
+scored candidate is missing, too short, dominated by links, or only a small
+fragment of the page, the extractor falls back to other body sources: the
+article body declared in structured data (JSON-LD or microdata ``articleBody``),
+and then a semantic article container (``<article>``, ``<main>`` or
+``role="main"``). Navigation blocks and repeated paragraphs are removed so the
+result stays continuous.
+
+The source that was actually used is exposed on :any:`Article.body_strategy`
+and included in the JSON output:
+
+.. code-block:: python
+
+    a = article('http://www.cnn.com/2014/01/12/world/asia/north-korea-charles-smith/index.html')
+
+    print(a.body_strategy)
+    # 'gravity_score'
+
+The possible values are:
+
+- ``gravity_score``: the default heuristic chose the body. This is the same
+  result previous versions produced.
+- ``structured_data``: the body came from JSON-LD or microdata
+  (``articleBody``/``articleText``).
+- ``semantic_container``: the body came from a semantic article container.
+- ``None``: no body could be found.
+
+
 Adding new languages
 --------------------
 

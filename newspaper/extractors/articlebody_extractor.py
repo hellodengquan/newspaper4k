@@ -25,6 +25,42 @@ score_weights = {
     "boost_min_stopword_count": 5,
 }
 
+# Identifiers of the sources that can provide the article body. The value is
+# stored on :any:`Article.body_strategy` and in the JSON output so that callers
+# can tell where the extracted text came from.
+BODY_STRATEGY_GRAVITY = "gravity_score"
+BODY_STRATEGY_STRUCTURED = "structured_data"
+BODY_STRATEGY_SEMANTIC = "semantic_container"
+
+# A body with fewer words than this cannot stand as the article body: it is a
+# caption, a teaser, or navigation. Structured/semantic sources are preferred.
+MIN_BODY_WORDS = 50
+
+# A scored body that is smaller than this fraction of the best alternative
+# source is considered to be only a fragment of the article.
+MIN_BODY_RATIO = 0.25
+
+# JSON-LD / microdata properties that carry the article body.
+_STRUCTURED_BODY_KEYS = ("articlebody", "articletext")
+
+# Tags and ARIA roles that describe site navigation rather than article text.
+_NAV_TAGS = ("nav", "aside", "footer", "header", "form", "menu", "script", "style", "noscript")
+_NAV_ROLES = ("navigation", "banner", "contentinfo", "complementary", "search", "menu", "menubar")
+_NAV_ATTR_RE = re.compile(
+    r"(?:^|[-_\s])"
+    r"(?:nav|navbar|navigation|menu|breadcrumb|breadcrumbs|footer|masthead|"
+    r"sidebar|related|share|social|subscribe|search)"
+    r"(?:$|[-_\s])",
+    re.IGNORECASE,
+)
+
+# Block elements that can hold a paragraph of the body. Used to drop repeated
+# content from fallback sources while keeping the original page order.
+_BLOCK_XPATH = ".//p | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6 | .//li | .//blockquote"
+
+# Elements that describe an article container semantically.
+_SEMANTIC_CONTAINERS_XPATH = "//article | //main | //*[@role='main']"
+
 get_stop_words = partial(parsers.get_attribute, attr="stop_words", type_=int, default=0)
 get_word_count = partial(parsers.get_attribute, attr="word_count", type_=int, default=0)
 
@@ -42,16 +78,486 @@ class ArticleBodyExtractor:
         self.top_node = None
         self.top_node_complemented = None
         self.stopwords: StopWords | None = None
+        # Source of the body that was finally selected. One of
+        # ``BODY_STRATEGY_GRAVITY``, ``BODY_STRATEGY_STRUCTURED`` or
+        # ``BODY_STRATEGY_SEMANTIC``, or None if no body was found.
+        self.body_strategy: str | None = None
 
     def parse(self, doc: HtmlElement):
         """Parse the document and identify the best article body node.
+
+        The gravity score is the default strategy. If the scored candidate is
+        missing, too short, dominated by links, or clearly smaller than a
+        complete alternative, the extractor falls back to the article body
+        offered by structured data (JSON-LD/microdata), then to a semantic
+        article container (``<article>``, ``<main>`` or ``role="main"``).
 
         Args:
             doc (HtmlElement): The document root element to parse.
         """
         self.stopwords = StopWords(self.config.language)
         self.top_node = self.calculate_best_node(doc)
+
+        if isinstance(doc, lxml.etree._Element):
+            strategy, node = self.select_body_strategy(doc, self.top_node)
+            self.body_strategy = strategy
+            self.top_node = node if node is not None else self.top_node
+        else:
+            # Documents that are not element trees cannot provide fallback
+            # sources; keep the scored node unchanged.
+            self.body_strategy = BODY_STRATEGY_GRAVITY if self.top_node is not None else None
+
         self.top_node_complemented = self.complement_with_siblings(self.top_node)
+
+    def select_body_strategy(self, doc: HtmlElement, scored_node: HtmlElement | None):
+        """Pick the most complete body source available on the page.
+
+        The gravity-scored node keeps priority as long as it is a plausible
+        article body and not a small fragment of a better source. Otherwise the
+        fallback candidates are compared and the most complete one wins. On equal
+        length, structured data is preferred over a semantic container.
+
+        Args:
+            doc (HtmlElement): Document root element.
+            scored_node (HtmlElement | None): Node selected by gravity scoring.
+
+        Returns:
+            tuple[str | None, HtmlElement | None]: The chosen strategy name and
+            the corresponding node. ``(None, None)`` when nothing usable exists.
+        """
+        gravity_candidate = (BODY_STRATEGY_GRAVITY, scored_node) if scored_node is not None else None
+
+        # Build the fallback candidates lazily. A cheap size estimate tells us
+        # whether any alternative could beat or match the scored body; if not,
+        # the default path is kept and no extra work is done.
+        if (
+            gravity_candidate is not None
+            and self.is_plausible_body(scored_node)
+            and not self.has_larger_fallback_source(doc, scored_node)
+        ):
+            return gravity_candidate
+
+        candidates: list[tuple[str, HtmlElement]] = []
+        if gravity_candidate is not None:
+            candidates.append(gravity_candidate)
+
+        candidates.extend(self.structured_body_candidates(doc))
+        if not self.page_declares_non_article(doc):
+            candidates.extend(self.semantic_body_candidates(doc))
+
+        # A complete body always wins over a fragment. Only when no candidate
+        # is complete do we fall back to the longest fragment available, which
+        # is still better than returning nothing.
+        complete = [item for item in candidates if self.is_plausible_body(item[1])]
+        if complete:
+            best_word_count = max(self.body_word_count(node) for _, node in complete)
+            if gravity_candidate is not None and self.is_plausible_body(scored_node):
+                if self.body_word_count(scored_node) >= best_word_count * MIN_BODY_RATIO:
+                    return gravity_candidate
+            for candidate in complete:
+                if self.body_word_count(candidate[1]) == best_word_count:
+                    return candidate
+            return complete[0]
+
+        if not candidates:
+            return None, None
+
+        # No complete source exists. Keep the longest fragment, preferring the
+        # gravity-scored node on ties (the historical default).
+        best_word_count = max(self.body_word_count(node) for _, node in candidates)
+        for candidate in candidates:
+            if self.body_word_count(candidate[1]) == best_word_count:
+                return candidate
+        return candidates[0]
+
+    def has_larger_fallback_source(self, doc: HtmlElement, scored_node: HtmlElement) -> bool:
+        """Return True if a fallback source can be as large as the scored body.
+
+        This is a cheap pre-check: it only measures the raw text of structured
+        bodies and semantic containers, without cloning or cleaning them. When
+        every fallback source is smaller than the scored body, the scored body
+        would win anyway, so the expensive fallback construction is skipped.
+
+        Args:
+            doc (HtmlElement): Document root element.
+            scored_node (HtmlElement): Body selected by gravity scoring.
+
+        Returns:
+            bool: True when the fallback sources must be inspected.
+        """
+        scored_words = self.body_word_count(scored_node)
+        # When the scored body is too short to stand as the article body, any
+        # fallback source is worth inspecting. Otherwise only a larger source
+        # could displace it.
+        min_words = 0 if scored_words < MIN_BODY_WORDS else scored_words
+
+        for obj in parsers.get_ld_json_object(doc):
+            for text in self._extract_structured_texts(obj):
+                if self._estimate_words(text) > min_words:
+                    return True
+
+        for element in doc.xpath(_SEMANTIC_CONTAINERS_XPATH):
+            # Only the text of the block elements is kept by the fallback, so
+            # measuring them avoids counting navigation and footer text.
+            blocks_words = sum(self._estimate_words("".join(block.itertext())) for block in element.xpath(_BLOCK_XPATH))
+            if blocks_words > min_words:
+                return True
+
+        return False
+
+    def _estimate_words(self, text: str) -> int:
+        """Approximate a word count without language-specific tokenization."""
+        return len((text or "").split())
+
+    def page_declares_non_article(self, doc: HtmlElement) -> bool:
+        """Return True when the page identifies itself as an article listing.
+
+        Index and section pages often expose a ``role="main"`` container full
+        of teaser links. Falling back to it would mix site navigation and
+        headline lists into the article text, so those pages are excluded from
+        the semantic fallback. A page counts as a listing when it declares an
+        ``og:type`` other than an article, or when its structured data only
+        describes a collection page, and it has no article container or
+        article markup anywhere on the page.
+
+        Args:
+            doc (HtmlElement): Document root element.
+
+        Returns:
+            bool: True when the semantic fallback should be skipped.
+        """
+        if doc.xpath("//article"):
+            return False
+        if self.page_has_article_structured_data(doc):
+            return False
+
+        og_types = {(meta.get("content") or "").strip().lower() for meta in parsers.get_metatags(doc, value="og:type")}
+        # "website" is the og:type used by homepages and section listings. Other
+        # non-article og:type values (e.g. "video.other") are left alone so a
+        # legitimately odd page can still use its semantic container.
+        if "website" in og_types:
+            return True
+
+        return self.page_is_collection(doc)
+
+    def page_is_collection(self, doc: HtmlElement) -> bool:
+        """Return True when JSON-LD only describes a collection page."""
+        collection_types = {"collectionpage", "webpage", "website", "searchresultspage", "itemlist"}
+
+        def visit(value) -> set[str]:
+            found: set[str] = set()
+            if isinstance(value, dict):
+                type_value = value.get("@type")
+                if isinstance(type_value, str):
+                    found.add(type_value.lower())
+                elif isinstance(type_value, list):
+                    found.update(item.lower() for item in type_value if isinstance(item, str))
+                for item in value.values():
+                    found |= visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    found |= visit(item)
+            return found
+
+        types: set[str] = set()
+        for obj in parsers.get_ld_json_object(doc):
+            types |= visit(obj)
+
+        return bool(types & collection_types) and not bool(
+            types & {"article", "newsarticle", "blogposting", "techarticle", "report"}
+        )
+
+    def page_has_article_structured_data(self, doc: HtmlElement) -> bool:
+        """Return True if JSON-LD/microdata describes an article."""
+        article_types = {
+            "article",
+            "newsarticle",
+            "blogposting",
+            "techarticle",
+            "scholarlyarticle",
+            "socialmediaposting",
+            "report",
+        }
+
+        def visit(value) -> bool:
+            if isinstance(value, dict):
+                type_value = value.get("@type")
+                if isinstance(type_value, str) and type_value.lower() in article_types:
+                    return True
+                if isinstance(type_value, list) and any(
+                    isinstance(item, str) and item.lower() in article_types for item in type_value
+                ):
+                    return True
+                return any(visit(item) for item in value.values())
+            if isinstance(value, list):
+                return any(visit(item) for item in value)
+            return False
+
+        if any(visit(obj) for obj in parsers.get_ld_json_object(doc)):
+            return True
+
+        return bool(
+            doc.xpath(
+                "//*[@itemtype][contains(translate(@itemtype, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                " 'abcdefghijklmnopqrstuvwxyz'), 'article')]"
+            )
+        )
+
+    def body_word_count(self, node: HtmlElement | None) -> int:
+        """Count the words of the node text using the configured tokenizer."""
+        if node is None:
+            return 0
+        text = parsers.get_text(node)
+        if not text:
+            return 0
+        if self.stopwords is None:
+            return len(text.split())
+        return len(list(self.stopwords.tokenizer(text)))
+
+    def is_plausible_body(self, node: HtmlElement) -> bool:
+        """Return True if the node can stand as the article body by itself.
+
+        A node is rejected when it has no text, is too short, or when most of
+        its text lives inside links (navigation, menus, related lists).
+        """
+        if node is None:
+            return False
+        text = parsers.get_text(node)
+        if not text:
+            return False
+        if parsers.is_highlink_density(node, self.config.language):
+            return False
+        return self.body_word_count(node) >= MIN_BODY_WORDS
+
+    def structured_body_candidates(self, doc: HtmlElement) -> list[tuple[str, HtmlElement]]:
+        """Collect article bodies exposed as structured data.
+
+        Both JSON-LD (``articleBody``/``articleText``) and microdata
+        (``itemprop="articleBody"``) are supported. Navigation blocks and
+        repeated paragraphs are pruned so the body stays contiguous.
+
+        Args:
+            doc (HtmlElement): Document root element.
+
+        Returns:
+            list[tuple[str, HtmlElement]]: ``(strategy, node)`` pairs, longest
+            first. Nodes are flat paragraph containers owned by the extractor.
+        """
+        nodes: list[HtmlElement] = []
+
+        for obj in parsers.get_ld_json_object(doc):
+            for text in self._extract_structured_texts(obj):
+                node = self._node_from_text(text)
+                if node is not None:
+                    nodes.append(node)
+
+        microdata = doc.xpath(
+            "//*[@itemprop][contains(translate(@itemprop, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+            " 'abcdefghijklmnopqrstuvwxyz'), 'articlebody') or"
+            " contains(translate(@itemprop, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+            " 'abcdefghijklmnopqrstuvwxyz'), 'articletext')]"
+        )
+        for element in microdata:
+            node = self._clone_article_container(element)
+            if node is None:
+                node = self._node_from_text(parsers.get_text(element))
+            if node is not None:
+                nodes.append(node)
+
+        nodes = [node for node in nodes if self.body_word_count(node) > 0]
+        nodes.sort(key=self.body_word_count, reverse=True)
+
+        return [(BODY_STRATEGY_STRUCTURED, node) for node in nodes]
+
+    def _extract_structured_texts(self, obj) -> list[str]:
+        """Recursively pull body strings out of a JSON-LD object."""
+        texts: list[str] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(key, str) and key.lower() in _STRUCTURED_BODY_KEYS and isinstance(value, str):
+                    texts.append(value)
+                else:
+                    texts.extend(self._extract_structured_texts(value))
+        elif isinstance(obj, list):
+            for item in obj:
+                texts.extend(self._extract_structured_texts(item))
+        return texts
+
+    def _node_from_text(self, text: str) -> HtmlElement | None:
+        """Build a flat paragraph container from a body string.
+
+        Structured bodies may contain HTML markup or plain text with line
+        breaks. The text blocks are extracted in document order and rebuilt as
+        consecutive paragraphs, so the result stays contiguous and does not
+        depend on the original wrapper elements.
+        """
+        if not text or not text.strip():
+            return None
+
+        blocks = self._text_blocks(text)
+        if not blocks:
+            return None
+
+        container = parsers.fromstring("<div></div>")
+        container.extend(blocks)
+        return self._strip_duplicates(container)
+
+    def _text_blocks(self, text: str) -> list[HtmlElement]:
+        """Split a body string into ordered paragraph elements."""
+        text = text.strip()
+        if "<" in text and ">" in text:
+            node = parsers.fromstring(f"<div>{text}</div>")
+            if node is not None:
+                blocks = [self._clone_block(item) for item in self._outermost_blocks(node.xpath(_BLOCK_XPATH))]
+                blocks = [block for block in blocks if parsers.get_text(block)]
+                if blocks:
+                    return blocks
+
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+        if len(paragraphs) < 2:
+            paragraphs = [part.strip() for part in text.splitlines() if part.strip()]
+        return [parsers.create_element(tag="p", text=part) for part in paragraphs]
+
+    def semantic_body_candidates(self, doc: HtmlElement) -> list[tuple[str, HtmlElement]]:
+        """Collect semantic article containers from the page.
+
+        ``<article>``, ``<main>`` and ``role="main"`` elements are considered.
+        Navigation blocks nested inside them are pruned so that menus and
+        related links do not leak into the article text.
+
+        Args:
+            doc (HtmlElement): Document root element.
+
+        Returns:
+            list[tuple[str, HtmlElement]]: ``(strategy, node)`` pairs, most
+            complete first. Nodes are off-tree copies, safe to clean.
+        """
+        containers = doc.xpath(_SEMANTIC_CONTAINERS_XPATH)
+        nodes = []
+        for container in containers:
+            node = self._clone_article_container(container)
+            if node is None:
+                continue
+            if self.body_word_count(node) <= 0:
+                continue
+            nodes.append(node)
+
+        nodes.sort(key=self.body_word_count, reverse=True)
+        return [(BODY_STRATEGY_SEMANTIC, node) for node in nodes]
+
+    def _clone_article_container(self, container: HtmlElement) -> HtmlElement | None:
+        """Copy a semantic container, drop navigation, and flatten paragraphs.
+
+        The container is copied first so the original document is never
+        modified. Navigation blocks are removed, then the remaining text is
+        rebuilt as consecutive paragraphs. This keeps the body continuous,
+        avoids duplicated sections, and shields the fallback from downstream
+        cleaners that use the original tree's scoring attributes.
+        """
+        node = copy.deepcopy(container)
+        node.tail = None
+
+        for tag in _NAV_TAGS:
+            parsers.remove(parsers.get_tags(node, tag=tag))
+
+        for bad in node.xpath("//*[@role]"):
+            role = (bad.get("role") or "").strip().lower()
+            if role in _NAV_ROLES:
+                parsers.remove(bad)
+
+        for bad in node.xpath("//*[@id or @class]"):
+            attrs = f"{bad.get('id', '')} {bad.get('class', '')}"
+            if _NAV_ATTR_RE.search(attrs) and parsers.is_highlink_density(bad, self.config.language):
+                parsers.remove(bad)
+
+        block_nodes = self._outermost_blocks(node.xpath(_BLOCK_XPATH))
+        blocks = [self._clone_block(item) for item in block_nodes]
+        blocks = [block for block in blocks if parsers.get_text(block)]
+
+        if not blocks:
+            # Containers without paragraph-like tags: keep the remaining text
+            # as a single block so no content is lost.
+            text = parsers.get_text(node)
+            if not text:
+                return None
+            blocks = [parsers.create_element(tag="p", text=text)]
+
+        body = parsers.fromstring("<div></div>")
+        body.extend(blocks)
+
+        return self._strip_duplicates(body)
+
+    def _clone_block(self, node: HtmlElement) -> HtmlElement:
+        """Copy a block element as a paragraph, keeping inline content.
+
+        Inline elements (notably links) are preserved so that link density can
+        still be evaluated on the fallback body, while the block is detached
+        from its original parents and siblings.
+        """
+        block = copy.deepcopy(node)
+        block.tail = ""
+        if block.tag not in ("p", "blockquote", "pre", "li"):
+            block.tag = "p"
+
+        for child in block.xpath(".//*[not(self::a or self::span or self::strong or self::b or self::em or self::i)]"):
+            parsers.drop_tags(child)
+
+        for element in [block, *block.xpath(".//*")]:
+            for attr in list(element.attrib):
+                if attr not in ("href", "src", "alt", "title"):
+                    del element.attrib[attr]
+
+        return block
+
+    def _outermost_blocks(self, block_nodes: list[HtmlElement]) -> list[HtmlElement]:
+        """Filter out block elements nested inside another block element.
+
+        Taking only the outermost blocks keeps each paragraph text once, in
+        document order, even when a list item contains its own paragraphs.
+        """
+        block_ids = {id(node) for node in block_nodes}
+        result = []
+        for node in block_nodes:
+            parent = node.getparent()
+            nested = False
+            while parent is not None:
+                if id(parent) in block_ids:
+                    nested = True
+                    break
+                parent = parent.getparent()
+            if not nested:
+                result.append(node)
+        return result
+
+    def _strip_duplicates(self, node: HtmlElement) -> HtmlElement | None:
+        """Remove repeated paragraphs, keeping the first occurrence.
+
+        Duplicate paragraphs are common in pages that render the same body in
+        more than one container. Removing them keeps the extracted text
+        contiguous and avoids the same text leaking in twice.
+
+        Args:
+            node (HtmlElement): Container to clean in place.
+
+        Returns:
+            HtmlElement | None: The same node, or None if it has no text left.
+        """
+        seen: set[str] = set()
+        for candidate in node.xpath(_BLOCK_XPATH):
+            key = self._paragraph_key(parsers.get_text(candidate))
+            if not key:
+                continue
+            if key in seen:
+                parsers.remove(candidate)
+            else:
+                seen.add(key)
+
+        return node if parsers.get_text(node) else None
+
+    def _paragraph_key(self, text: str) -> str:
+        """Normalize a paragraph for duplicate detection."""
+        text = re.sub(r"[^\w\s]", "", text or "").lower()
+        return re.sub(r"\s+", " ", text).strip()
 
     def calculate_best_node(self, doc):
         """Calculate the node most likely to contain the article body.

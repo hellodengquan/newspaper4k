@@ -1,5 +1,12 @@
 # Change Log
 
+### Unreleased
+
+### New feature:
+
+- **parse**: multi-strategy fallback for the article body. When the gravity-scored candidate is missing, too short, dominated by links, or only a small fragment of the page, the extractor now falls back to the body declared in structured data (JSON-LD/microdata `articleBody`) and then to a semantic article container (`<article>`, `<main>`, `role="main"`). Navigation blocks and repeated paragraphs are pruned from fallback sources so the text stays continuous.
+- **parse**: new `Article.body_strategy` attribute (also in `to_json`/CSV output) reporting the source that produced the body: `gravity_score`, `structured_data`, `semantic_container` or `None`. Default pages keep returning `gravity_score` and the same text as before.
+
 ### 0.9.6.1 (2026-11-01)
 
 Security release. Fixes a server-side request forgery (SSRF, CWE-918) in versions up to and including 0.9.6. Page content could make the server request internal addresses (loopback, private ranges, cloud metadata endpoints such as `169.254.169.254`), for example through `<img src>` or `og:image` URLs fetched during `Article.parse()`.
