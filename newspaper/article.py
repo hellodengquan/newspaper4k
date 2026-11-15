@@ -76,8 +76,15 @@ class Article:
             selectors separated by ``|``.
         top_image (str): The top image url of the article. It will try to guess
             the best fit for a main image from the images found in the article.
+            Candidates come from the same resolved and deduplicated set as
+            :any:`Article.images`; when ``fetch_images`` is True candidates are
+            downloaded once per address to validate their size.
         meta_img (str): Image url provided by metadata
-        images (list[str]): List of all image urls in the current article
+        images (list[str]): List of all image urls in the current article, in
+            page order. Relative, protocol-relative, lazy loading and
+            ``srcset`` candidates are resolved to absolute urls first, then
+            deduplicated by a normalized form that ignores the scheme,
+            ``www.`` and a trailing slash but keeps query parameters.
         movies (list[str]): List of video links in the article body
         text (str): a parsed version of the article body. It will be truncated
             to the first `config.max_text` characters.

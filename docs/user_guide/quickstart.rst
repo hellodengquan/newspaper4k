@@ -252,6 +252,37 @@ If you call ``parse()`` before a ``download()`` it will throw an ``ArticleExcept
     print(first_article.movies)
     # ['url_to_youtube_link_1', ...] # youtube, vimeo, etc
 
+Image candidates
+^^^^^^^^^^^^^^^^
+
+Both :any:`Article.images` and :any:`Article.top_image` are derived from the
+same candidate set built from the page's ``img`` elements:
+
+* relative and protocol-relative references (``/photos/a.jpg``,
+  ``//cdn.example.com/a.jpg``) and scheme-less article URLs are resolved
+  against the page URL, honouring a ``<base href>`` when the page declares one;
+* lazy loading attributes (``data-src``, ``data-lazy-src``, ``data-original``,
+  ...) and every ``srcset``/``data-srcset`` entry contribute candidates in
+  attribute order, so the real image behind a placeholder is picked up;
+* candidates are deduplicated by a normalized URL that ignores the scheme,
+  a leading ``www.`` and a trailing slash but keeps query parameters, and the
+  first occurrence keeps its position;
+* ``images`` keeps page order regardless of whether ``fetch_images`` is set.
+
+When ``fetch_images`` is ``True``, ``top_image`` is the first candidate that
+passes the size limits in ``config.top_image_settings``, starting with the
+metadata image. Each normalized address is downloaded at most once by an
+extractor, and a candidate that fails to download or is too small only moves
+the selection forward: it does not reorder or remove other candidates.
+
+.. code-block:: python
+
+    from newspaper import Article, Config
+
+    config = Config()
+    config.fetch_images = False  # skip downloads, use the meta image as top_image
+    article = Article(url, config=config)
+
 
 Performing NLP on an Article
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
