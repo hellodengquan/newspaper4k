@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Broken URL date falls back</title>
+    <!-- meta candidate: score 7 -->
+    <meta property="article:published_time" content="2024-03-09">
+    <!-- JSON-LD top-level datePublished: score 9. Must win because the
+         URL date (2024/02/30) matches the strict URL date regex but is
+         not a real calendar day, so no URL candidate is produced. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "Broken URL date falls back",
+        "datePublished": "2024-03-10T12:00:00+00:00"
+    }
+    </script>
+</head>
+<body>
+    <article>
+        <h1>Broken URL date falls back</h1>
+        <p>Body text of the article used to exercise publication date
+        extraction when the highest-priority candidate (the URL date)
+        is corrupted and lower-priority sources must take over.</p>
+    </article>
+</body>
+</html>

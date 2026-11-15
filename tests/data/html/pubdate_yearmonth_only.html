@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Year-month only candidate</title>
+    <!-- meta candidate with year and month only: score 7. The missing
+         day is filled in from the current date by the date parser, so
+         the result legitimately depends on "now". -->
+    <meta property="article:published_time" content="2024-03">
+</head>
+<body>
+    <article>
+        <h1>Year-month only candidate</h1>
+        <!-- time tag without boost words: score 5, always loses to the
+             meta candidate above. -->
+        <time datetime="2024-03-05">Last reviewed March 5</time>
+        <p>Body text of the article used to exercise publication date
+        extraction when the best candidate only carries a year and a
+        month.</p>
+    </article>
+</body>
+</html>

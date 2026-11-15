@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Same instant, different offsets</title>
+    <!-- meta candidate: naive date, score 7 -->
+    <meta property="article:published_time" content="2024-03-15">
+    <!-- JSON-LD top-level datePublished: score 9.
+         2024-03-15T23:30:00-05:00 is the SAME instant as the time tag's
+         2024-03-16T04:30:00Z, expressed with a different UTC offset and
+         a different local calendar date. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "Same instant, different offsets",
+        "datePublished": "2024-03-15T23:30:00-05:00"
+    }
+    </script>
+</head>
+<body>
+    <article>
+        <h1>Same instant, different offsets</h1>
+        <!-- time tag with boost word: score 8. Same instant as the
+             JSON-LD date, shifted across the date boundary to UTC. -->
+        <time datetime="2024-03-16T04:30:00+00:00">Published on March 16</time>
+        <p>Body text of the article used to exercise publication date
+        extraction with timezone-equivalent representations.</p>
+    </article>
+</body>
+</html>

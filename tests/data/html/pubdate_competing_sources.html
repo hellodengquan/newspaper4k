@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Competing date sources</title>
+    <!-- meta candidate: score 6 + 1 (meta boost) = 7 -->
+    <meta property="article:published_time" content="2024-03-12">
+    <!-- JSON-LD @graph datePublished: score 10, inserted after the URL date -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "NewsArticle",
+                "headline": "Competing date sources",
+                "datePublished": "2024-03-14T10:00:00+00:00"
+            }
+        ]
+    }
+    </script>
+    <!-- JSON-LD top-level datePublished: score 9.
+         Same calendar date as the URL date (2024-03-15) but a different
+         instant and timezone-aware: picking this source by mistake keeps
+         the date string identical while changing the moment/timezone. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "Competing date sources",
+        "datePublished": "2024-03-15T09:30:00+02:00"
+    }
+    </script>
+</head>
+<body>
+    <article>
+        <h1>Competing date sources</h1>
+        <!-- time tag with boost word "Published": score 8 -->
+        <time datetime="2024-03-13T08:00:00+00:00">Published on March 13</time>
+        <p>Body text of the article used to exercise publication date
+        extraction when several sources compete on the same page.</p>
+    </article>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Broken JSON-LD candidates fall back</title>
+    <!-- meta candidate: score 7 -->
+    <meta property="article:published_time" content="2024-03-09">
+    <!-- Malformed JSON-LD script: skipped entirely by the parser. -->
+    <script type="application/ld+json">{invalid json</script>
+    <!-- JSON-LD @graph with an unparseable datePublished: would score 10
+         but yields no candidate, so extraction must fall through. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "NewsArticle",
+                "headline": "Broken JSON-LD candidates fall back",
+                "datePublished": "not-a-date-at-all"
+            }
+        ]
+    }
+    </script>
+    <!-- JSON-LD top-level datePublished: score 9, the first VALID
+         high-priority candidate. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "Broken JSON-LD candidates fall back",
+        "datePublished": "2024-03-11"
+    }
+    </script>
+</head>
+<body>
+    <article>
+        <h1>Broken JSON-LD candidates fall back</h1>
+        <p>Body text of the article used to exercise publication date
+        extraction when the structured-data candidates are corrupted.</p>
+    </article>
+</body>
+</html>
